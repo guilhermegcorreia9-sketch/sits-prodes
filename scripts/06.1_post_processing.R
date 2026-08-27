@@ -427,57 +427,6 @@ chop_polygons <- function(pol, class, mask, dist){
   return(combinado)
 }
 
-# Assign class by Intersection
-assign_class_by_intersection <- function(supression_polygons, vector_multipolygons) {
-  
-  s2_state <- sf::sf_use_s2()
-  on.exit(sf::sf_use_s2(s2_state), add = TRUE)
-  sf::sf_use_s2(FALSE)
-  
-  vector_multipolygons_valid <- vector_multipolygons |>
-    sf::st_transform(sf::st_crs(supression_polygons)) |>
-    sf::st_make_valid()
-  
-  supression_polygons <- sf::st_make_valid(supression_polygons) |>
-    dplyr::mutate(.id_pai = dplyr::row_number())
-  
-  # ---- 1. Interseção: uma feição separada por trecho/classe sobreposta ----
-  intersecao <- sf::st_intersection(supression_polygons, vector_multipolygons_valid) |>
-    sf::st_collection_extract("POLYGON") |>
-    sf::st_cast("MULTIPOLYGON")
-  
-  # ---- 2. Classe majoritária por polígono-pai (maior área de interseção) --
-  #    usada só para herdar as sobras -----------------------------------
-  classe_majoritaria <- intersecao |>
-    dplyr::mutate(area_intersec = sf::st_area(intersecao)) |>
-    sf::st_drop_geometry() |>
-    dplyr::group_by(.id_pai) |>
-    dplyr::slice_max(order_by = area_intersec, n = 1, with_ties = FALSE) |>
-    dplyr::select(.id_pai, class_majoritaria = class)
-  
-  # ---- 3. Parte de cada polígono sem nenhuma correspondência de classe ----
-  classes_union <- sf::st_union(vector_multipolygons_valid)
-  
-  sobras <- supression_polygons |>
-    sf::st_difference(classes_union) |>
-    sf::st_collection_extract("POLYGON") |>
-    sf::st_cast("MULTIPOLYGON")
-  
-  sobras <- sobras[!sf::st_is_empty(sf::st_geometry(sobras)), ]
-  
-  # ---- 4. Sobras herdam a classe majoritária do seu polígono-pai ----------
-  #    (se o pai não teve NENHUMA interseção, não há de onde herdar -> NA)
-  sobras <- sobras |>
-    dplyr::left_join(classe_majoritaria, by = ".id_pai") |>
-    dplyr::rename(class = class_majoritaria)
-  
-  resultado <- dplyr::bind_rows(intersecao, sobras) |>
-    dplyr::select(-.id_pai) |>
-    sf::st_make_valid()
-  
-  return(resultado)
-}
-
 # Função auxiliar para calcular e exibir o tempo decorrido
 log_step_time <- function(step_name, start_time) {
   elapsed <- round(difftime(Sys.time(), start_time, units = "secs"), 2)
@@ -733,43 +682,21 @@ process_tile <- function(tile) {
   gc()
   log_step_time("Step 9", t_step)
 
-  # ----------------------------------------------------------
-  # 10. Assigning class to each feature by geometric intersection
-  # ----------------------------------------------------------
-  t_step <- Sys.time()
-  message("Step 10 of 10 -> Assigning class to each feature by geometric intersection.")
-  
-  sits_classes_intersection <- assign_class_by_intersection(
-    supression_polygons     = chopped_polygons,
-    vector_multipolygons    = sf::st_set_precision(vector_multipolygons, precision)
-  )
-  
-  rm(chopped_polygons, vector_multipolygons, mask_union)
+  rm(vector_multipolygons, mask_union)
   gc()
-  
-  log_step_time("Step 10", t_step)
-  
+            
   # ----------------------------------------------------------
-  # 11. Save final result
+  # 10. Save final result
   # ----------------------------------------------------------
   t_step <- Sys.time()
+  message("Step 10 of 10 -> Saving geopackage file.")
   
-  final <- sits_classes_intersection |>
+  final <- chopped_polygons |>
     st_as_sf(sf_column_name = "geom") |>
     dplyr::select(
       any_of(c(
         "fid", 
-        "class"
       ))
-    ) |>
-    dplyr::mutate(
-      class = dplyr::case_match(
-        class,
-        "Clear_Cut" ~ "Corte Raso",
-        "Clear_Cut_Herbaceous" ~ "Desmatamento com Vegetação",
-        "Mininig" ~ "Mineração",
-        .default = class
-      )
     ) |>
     sf::st_collection_extract("POLYGON") |>
     sf::st_cast("POLYGON") |>
@@ -784,10 +711,12 @@ process_tile <- function(tile) {
   )
   
   sf::st_write(final, dsn = output_file, delete_dsn = TRUE)
-  
+
+  log_step_time("Step 10", t_step)
+            
   message("Tile ", tile, " successfully processed -> ", output_file)
   
-  rm(sits_classes_intersection, final)
+  rm(chopped_polygons, final)
   gc()
   
   return(invisible(output_file))
